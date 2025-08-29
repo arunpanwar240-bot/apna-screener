@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 import pandas as pd
-from dhanhq import DhanContext, dhanhq
+from dhanhq import dhanhq
 from datetime import datetime, timedelta, time
 import requests
 import json
@@ -32,10 +32,10 @@ def save_config(cfg):
 
 config = load_config()
 
+# ✅ Updated get_dhan()
 def get_dhan():
     if config.get("client_id") and config.get("access_token"):
-        ctx = DhanContext(client_id=config["client_id"], access_token=config["access_token"])
-        return dhanhq(ctx)
+        return dhanhq(config["client_id"], config["access_token"])
     return None
 
 sent_alerts = set()
@@ -198,13 +198,10 @@ def show_data():
     interval_key = request.args.get('interval', '15min')
     selected_index = request.args.get('index', 'NIFTY')
     
-    # For OHLC Table: Only selected index
     table_data = []
-    # For Signals: Always ALL indices
     all_bullish = []
     all_bearish = []
     
-    # Process ALL indices for signals
     for index_name, security_id in INDEX_IDS.items():
         try:
             fetch_interval = BASE_INTERVAL.get(interval_key, interval_key)
@@ -237,12 +234,10 @@ def show_data():
             if interval_key in RESAMPLE_RULES:
                 df = resample_session_anchored(df, RESAMPLE_RULES[interval_key], offset_minutes=555)
             
-            # Generate signals for ALL indices
             bullish_signals, bearish_signals = detect_signals_from_df(df, interval_key, index_name)
             all_bullish.extend(bullish_signals)
             all_bearish.extend(bearish_signals)
             
-            # Add to table data ONLY if this is the selected index
             if index_name == selected_index:
                 table_data.extend(df.assign(index=index_name).to_dict(orient="records"))
                 
