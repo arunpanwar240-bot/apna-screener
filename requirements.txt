@@ -1,5 +1,6 @@
-Flask
-gunicorn
-pandas
-requests
-dhanhq
+Flask==3.0.3
+pandas==2.2.2
+dhanhq==1.0.4
+requests==2.32.3
+apscheduler==3.10.4
+gunicorn==22.0.0
