@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 import pandas as pd
-from dhanhq import dhanhq 
+from dhanhq import DhanContext, dhanhq
 from datetime import datetime, timedelta, time
 import requests
 import json
@@ -39,7 +39,7 @@ config = load_config()
 
 def get_dhan():
     if config.get("client_id") and config.get("access_token"):
-        ctx = Dhanhq(client_id=config["client_id"], access_token=config["access_token"]) 
+        ctx = DhanContext(client_id=config["client_id"], access_token=config["access_token"])
         return dhanhq(ctx)
     return None
 
@@ -755,5 +755,4 @@ def todays_signal():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)    
-
+    app.run(debug=True)  
