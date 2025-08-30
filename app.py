@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 import pandas as pd
-from dhanhq import dhanhq
+from dhanhq import dhanhq 
 from datetime import datetime, timedelta, time
 import requests
 import json
@@ -10,10 +10,12 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 import traceback
 
+
 app = Flask(__name__)
 app.secret_key = "supersecretkey"
 
 CONFIG_FILE = "config.json"
+
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -26,20 +28,25 @@ def load_config():
         "telegram_chat_id": ""
     }
 
+
 def save_config(cfg):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=4)
 
+
 config = load_config()
 
-# ✅ Updated get_dhan()
+
 def get_dhan():
     if config.get("client_id") and config.get("access_token"):
-        return dhanhq(config["client_id"], config["access_token"])
+        ctx = Dhanhq(client_id=config["client_id"], access_token=config["access_token"]) 
+        return dhanhq(ctx)
     return None
+
 
 sent_alerts = set()
 last_alert_sent = None
+
 
 def send_telegram_message(message):
     global sent_alerts
@@ -58,10 +65,12 @@ def send_telegram_message(message):
     except Exception as e:
         print("❌ Telegram Error:", e)
 
-TIMEFRAMES_TO_NOTIFY = ["1min", "5min", "15min", "30min", "45min", "1h", "2h", "3h", "4h"]
+
+TIMEFRAMES_TO_NOTIFY = ["15min", "30min", "45min", "1h", "2h", "3h", "4h"]
 TIMEFRAME_MAP = {
     "1min": 1, "5min": 5, "15min": 15,
-    "1h": 60, "1d": "1D", "1w": "1W", "1M": "1M"
+    "1h": 60, "1d": "1D", "1w": "1W", "1m": "1M",
+    "1W": "1W", "2W": "2W", "1M": "1M"  # normalized keys
 }
 BASE_INTERVAL = {
     "30min": "15min",
@@ -78,8 +87,11 @@ RESAMPLE_RULES = {
     "4h": "4h"
 }
 INDEX_IDS = {"NIFTY": "13", "BANKNIFTY": "25", "SENSEX": "51"}
+
+
 SESSION_START = time(9, 15)
 SESSION_END   = time(15, 30)
+
 
 def resample_session_anchored(df: pd.DataFrame, rule: str, offset_minutes: int) -> pd.DataFrame:
     if df.empty:
@@ -107,6 +119,7 @@ def resample_session_anchored(df: pd.DataFrame, rule: str, offset_minutes: int) 
         return df.iloc[0:0].copy()
     return pd.concat(out, ignore_index=True)
 
+
 def extract_data_list_from_response(res):
     if res is None:
         return None
@@ -130,13 +143,17 @@ def extract_data_list_from_response(res):
         pass
     return None
 
+
 def detect_signals_from_df(df: pd.DataFrame, interval_key: str, index_name: str):
     bullish = []
     bearish = []
     for _, row in df.iterrows():
         ts = row.get("timestamp")
-        if pd.isna(ts) or not (SESSION_START <= ts.time() <= SESSION_END):
-            continue
+        if pd.isna(ts) or (interval_key in ["15min","30min","45min","1h","2h","3h","4h"] and not (SESSION_START <= ts.time() <= SESSION_END)):
+            if interval_key not in ["15min","30min","45min","1h","2h","3h","4h"]:
+                pass
+            else:
+                continue
         o, h, l, c = row["open"], row["high"], row["low"], row["close"]
         if pd.isna(o) or pd.isna(h) or pd.isna(l) or pd.isna(c):
             continue
@@ -187,83 +204,394 @@ def detect_signals_from_df(df: pd.DataFrame, interval_key: str, index_name: str)
             })
     return bullish, bearish
 
+
+def resample_weekly_from_month_start(df_daily: pd.DataFrame):
+    if df_daily.empty:
+        return df_daily
+
+    out = []
+    for (year, month), group in df_daily.groupby([df_daily["timestamp"].dt.year, df_daily["timestamp"].dt.month]):
+        group = group.sort_values("timestamp")
+        start_date = group["timestamp"].iloc[0].normalize()  # first day of that month
+
+        resampled = (
+            group.set_index("timestamp")
+            .resample('7D', label='left', closed='left', origin=start_date)
+            .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+            .dropna()
+            .reset_index()
+        )
+        out.append(resampled)
+
+    if not out:
+        return pd.DataFrame()
+    return pd.concat(out, ignore_index=True)
+
+
 @app.route('/')
 def show_data():
     dhan = get_dhan()
     if not dhan:
         flash("⚠ Please configure your Dhan credentials in Settings.")
         return redirect(url_for("settings"))
-    from_date = request.args.get('from_date', (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d"))
-    to_date   = request.args.get('to_date', datetime.now().strftime("%Y-%m-%d"))
-    interval_key = request.args.get('interval', '15min')
+    from_date = request.args.get('from_date', (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"))
+    to_date = request.args.get('to_date', datetime.now().strftime("%Y-%m-%d"))
+    interval_key = request.args.get('interval', '15min').upper()  # Normalize interval key here
     selected_index = request.args.get('index', 'NIFTY')
-    
+
+    # Normalize "1w" -> "1W" and "1m" -> "1M" for consistency
+    if interval_key.lower() == "1w":
+        interval_key = "1W"
+    if interval_key.lower() == "1m":
+        interval_key = "1M"
+
     table_data = []
     all_bullish = []
     all_bearish = []
-    
+
     for index_name, security_id in INDEX_IDS.items():
         try:
-            fetch_interval = BASE_INTERVAL.get(interval_key, interval_key)
-            interval_value = TIMEFRAME_MAP.get(fetch_interval, 15)
-            if interval_value in ["1D", "1W", "1M"]:
-                res = dhan.historical_daily_data(
-                    security_id=security_id, exchange_segment="IDX_I", instrument_type="INDEX",
-                    from_date=from_date, to_date=to_date
+            if interval_key == "1W":
+                # weekly resample starting week count from first day of month
+                daily_res = dhan.historical_daily_data(
+                    security_id=security_id,
+                    exchange_segment="IDX_I",
+                    instrument_type="INDEX",
+                    from_date=from_date,
+                    to_date=to_date,
                 )
-            else:
-                res = dhan.intraday_minute_data(
-                    security_id=security_id, exchange_segment="IDX_I", instrument_type="INDEX",
-                    from_date=from_date, to_date=to_date, interval=interval_value
+                daily_data_list = extract_data_list_from_response(daily_res)
+                if not daily_data_list:
+                    continue
+                df_daily = pd.DataFrame(daily_data_list)
+                if df_daily.empty:
+                    continue
+                if "timestamp" in df_daily.columns:
+                    df_daily["timestamp"] = pd.to_datetime(
+                        df_daily["timestamp"], unit="s", errors="coerce", utc=True
+                    ).dt.tz_convert("Asia/Kolkata")
+                for col in ["open", "high", "low", "close"]:
+                    df_daily[col] = pd.to_numeric(df_daily.get(col, pd.NA), errors="coerce")
+
+                df_resampled = resample_weekly_from_month_start(df_daily)
+
+                bullish_signals, bearish_signals = detect_signals_from_df(df_resampled, interval_key, index_name)
+                all_bullish.extend(bullish_signals)
+                all_bearish.extend(bearish_signals)
+
+                if index_name == selected_index:
+                    table_data.extend(df_resampled.assign(index=index_name).to_dict(orient="records"))
+
+            elif interval_key == "2W":
+                daily_res = dhan.historical_daily_data(
+                    security_id=security_id,
+                    exchange_segment="IDX_I",
+                    instrument_type="INDEX",
+                    from_date=from_date,
+                    to_date=to_date,
                 )
-            data_list = extract_data_list_from_response(res)
-            if not data_list:
-                continue
-            df = pd.DataFrame(data_list)
-            if df.empty:
-                continue
-            if "timestamp" in df.columns:
-                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", errors="coerce", utc=True).dt.tz_convert("Asia/Kolkata")
-            elif "time" in df.columns:
-                df["timestamp"] = pd.to_datetime(df["time"], unit="s", errors="coerce", utc=True).dt.tz_convert("Asia/Kolkata")
+                daily_data_list = extract_data_list_from_response(daily_res)
+                if not daily_data_list:
+                    continue
+                df_daily = pd.DataFrame(daily_data_list)
+                if df_daily.empty:
+                    continue
+                if "timestamp" in df_daily.columns:
+                    df_daily["timestamp"] = pd.to_datetime(
+                        df_daily["timestamp"], unit="s", errors="coerce", utc=True
+                    ).dt.tz_convert("Asia/Kolkata")
+                for col in ["open", "high", "low", "close"]:
+                    df_daily[col] = pd.to_numeric(df_daily.get(col, pd.NA), errors="coerce")
+
+                df_resampled = (
+                    df_daily.set_index("timestamp")
+                    .resample("2W-MON", label="left", closed="left")
+                    .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+                    .dropna()
+                    .reset_index()
+                )
+
+                bullish_signals, bearish_signals = detect_signals_from_df(df_resampled, interval_key, index_name)
+                all_bullish.extend(bullish_signals)
+                all_bearish.extend(bearish_signals)
+
+                if index_name == selected_index:
+                    table_data.extend(df_resampled.assign(index=index_name).to_dict(orient="records"))
+
+            elif interval_key == "1M":
+                daily_res = dhan.historical_daily_data(
+                    security_id=security_id,
+                    exchange_segment="IDX_I",
+                    instrument_type="INDEX",
+                    from_date=from_date,
+                    to_date=to_date,
+                )
+                daily_data_list = extract_data_list_from_response(daily_res)
+                if not daily_data_list:
+                    continue
+                df_daily = pd.DataFrame(daily_data_list)
+                if df_daily.empty:
+                    continue
+                if "timestamp" in df_daily.columns:
+                    df_daily["timestamp"] = pd.to_datetime(
+                        df_daily["timestamp"], unit="s", errors="coerce", utc=True
+                    ).dt.tz_convert("Asia/Kolkata")
+                for col in ["open", "high", "low", "close"]:
+                    df_daily[col] = pd.to_numeric(df_daily.get(col, pd.NA), errors="coerce")
+
+                df_resampled = (
+                    df_daily.set_index("timestamp")
+                    .resample("MS", label="left", closed="left")
+                    .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+                    .dropna()
+                    .reset_index()
+                )
+
+                bullish_signals, bearish_signals = detect_signals_from_df(df_resampled, interval_key, index_name)
+                all_bullish.extend(bullish_signals)
+                all_bearish.extend(bearish_signals)
+
+                if index_name == selected_index:
+                    table_data.extend(df_resampled.assign(index=index_name).to_dict(orient="records"))
+
             else:
-                df["timestamp"] = pd.NaT
-            for col in ["open", "high", "low", "close"]:
-                df[col] = pd.to_numeric(df.get(col, pd.NA), errors="coerce")
-            df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0)
-            if interval_key in RESAMPLE_RULES:
-                df = resample_session_anchored(df, RESAMPLE_RULES[interval_key], offset_minutes=555)
-            
-            bullish_signals, bearish_signals = detect_signals_from_df(df, interval_key, index_name)
-            all_bullish.extend(bullish_signals)
-            all_bearish.extend(bearish_signals)
-            
-            if index_name == selected_index:
-                table_data.extend(df.assign(index=index_name).to_dict(orient="records"))
-                
+                fetch_interval = BASE_INTERVAL.get(interval_key, interval_key)
+                interval_value = TIMEFRAME_MAP.get(fetch_interval, 15)
+                if interval_value in ["1D", "1W", "1M"]:
+                    res = dhan.historical_daily_data(
+                        security_id=security_id,
+                        exchange_segment="IDX_I",
+                        instrument_type="INDEX",
+                        from_date=from_date,
+                        to_date=to_date,
+                    )
+                else:
+                    res = dhan.intraday_minute_data(
+                        security_id=security_id,
+                        exchange_segment="IDX_I",
+                        instrument_type="INDEX",
+                        from_date=from_date,
+                        to_date=to_date,
+                        interval=interval_value,
+                    )
+                data_list = extract_data_list_from_response(res)
+                if not data_list:
+                    continue
+                df = pd.DataFrame(data_list)
+                if df.empty:
+                    continue
+                if "timestamp" in df.columns:
+                    df["timestamp"] = pd.to_datetime(
+                        df["timestamp"], unit="s", errors="coerce", utc=True
+                    ).dt.tz_convert("Asia/Kolkata")
+                elif "time" in df.columns:
+                    df["timestamp"] = pd.to_datetime(
+                        df["time"], unit="s", errors="coerce", utc=True
+                    ).dt.tz_convert("Asia/Kolkata")
+                else:
+                    df["timestamp"] = pd.NaT
+                for col in ["open", "high", "low", "close"]:
+                    df[col] = pd.to_numeric(df.get(col, pd.NA), errors="coerce")
+                df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0)
+                if interval_key in RESAMPLE_RULES:
+                    df = resample_session_anchored(df, RESAMPLE_RULES[interval_key], offset_minutes=555)
+
+                bullish_signals, bearish_signals = detect_signals_from_df(df, interval_key, index_name)
+                all_bullish.extend(bullish_signals)
+                all_bearish.extend(bearish_signals)
+
+                if index_name == selected_index:
+                    table_data.extend(df.assign(index=index_name).to_dict(orient="records"))
+
         except Exception as e:
             print(f"❌ Error in show_data() for {index_name}: {e}")
             traceback.print_exc()
             continue
-    
-    return render_template("table.html",
-                          data=table_data,
-                          bullish_signals=all_bullish,
-                          bearish_signals=all_bearish,
-                          from_date=from_date, to_date=to_date,
-                          interval=interval_key, index=selected_index,
-                          alerts_active=True, last_alert_sent=last_alert_sent,
-                          index_choices=INDEX_IDS.keys())
+
+    # Independent fetch of today’s signals all timeframes including weekly, biweekly, monthly
+    todays_signals_all_timeframes = []
+    dhan_independent = get_dhan()
+    if dhan_independent:
+        from_today = datetime.now().strftime("%Y-%m-%d")
+        to_today = from_today
+
+        extended_timeframes = TIMEFRAMES_TO_NOTIFY + ["1W", "2W", "1M"]
+        for interval_key_tf in extended_timeframes:
+            fetch_interval_tf = BASE_INTERVAL.get(interval_key_tf, interval_key_tf)
+            interval_value_tf = TIMEFRAME_MAP.get(fetch_interval_tf, 15)
+
+            for index_name_tf, security_id_tf in INDEX_IDS.items():
+                try:
+                    ik = interval_key_tf.upper()
+                    if ik == "1W":
+                        daily_res = dhan_independent.historical_daily_data(
+                            security_id=security_id_tf,
+                            exchange_segment="IDX_I",
+                            instrument_type="INDEX",
+                            from_date=from_date,
+                            to_date=to_date,
+                        )
+                        daily_data = extract_data_list_from_response(daily_res)
+                        if not daily_data:
+                            continue
+                        df_daily = pd.DataFrame(daily_data)
+                        if df_daily.empty:
+                            continue
+                        if "timestamp" in df_daily.columns:
+                            df_daily["timestamp"] = pd.to_datetime(
+                                df_daily["timestamp"], unit="s", errors="coerce", utc=True
+                            ).dt.tz_convert("Asia/Kolkata")
+                        for col in ["open", "high", "low", "close"]:
+                            df_daily[col] = pd.to_numeric(df_daily.get(col, pd.NA), errors="coerce")
+
+                        df_resampled = resample_weekly_from_month_start(df_daily)
+                        bullish_tf, bearish_tf = detect_signals_from_df(df_resampled, ik, index_name_tf)
+                        for sig in bullish_tf + bearish_tf:
+                            if sig["time"].date() >= datetime.now().date() - timedelta(days=60):
+                                todays_signals_all_timeframes.append(sig)
+
+                    elif ik == "2W":
+                        daily_res = dhan_independent.historical_daily_data(
+                            security_id=security_id_tf,
+                            exchange_segment="IDX_I",
+                            instrument_type="INDEX",
+                            from_date=from_date,
+                            to_date=to_date,
+                        )
+                        daily_data = extract_data_list_from_response(daily_res)
+                        if not daily_data:
+                            continue
+                        df_daily = pd.DataFrame(daily_data)
+                        if df_daily.empty:
+                            continue
+                        if "timestamp" in df_daily.columns:
+                            df_daily["timestamp"] = pd.to_datetime(
+                                df_daily["timestamp"], unit="s", errors="coerce", utc=True
+                            ).dt.tz_convert("Asia/Kolkata")
+                        for col in ["open", "high", "low", "close"]:
+                            df_daily[col] = pd.to_numeric(df_daily.get(col, pd.NA), errors="coerce")
+
+                        df_resampled = (
+                            df_daily.set_index("timestamp")
+                            .resample("2W-MON", label="left", closed="left")
+                            .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+                            .dropna()
+                            .reset_index()
+                        )
+                        bullish_tf, bearish_tf = detect_signals_from_df(df_resampled, ik, index_name_tf)
+                        for sig in bullish_tf + bearish_tf:
+                            if sig["time"].date() >= datetime.now().date() - timedelta(days=60):
+                                todays_signals_all_timeframes.append(sig)
+
+                    elif ik == "1M":
+                        daily_res = dhan_independent.historical_daily_data(
+                            security_id=security_id_tf,
+                            exchange_segment="IDX_I",
+                            instrument_type="INDEX",
+                            from_date=from_date,
+                            to_date=to_date,
+                        )
+                        daily_data = extract_data_list_from_response(daily_res)
+                        if not daily_data:
+                            continue
+                        df_daily = pd.DataFrame(daily_data)
+                        if df_daily.empty:
+                            continue
+                        if "timestamp" in df_daily.columns:
+                            df_daily["timestamp"] = pd.to_datetime(
+                                df_daily["timestamp"], unit="s", errors="coerce", utc=True
+                            ).dt.tz_convert("Asia/Kolkata")
+                        for col in ["open", "high", "low", "close"]:
+                            df_daily[col] = pd.to_numeric(df_daily.get(col, pd.NA), errors="coerce")
+
+                        df_resampled = (
+                            df_daily.set_index("timestamp")
+                            .resample("MS", label="left", closed="left")
+                            .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+                            .dropna()
+                            .reset_index()
+                        )
+                        bullish_tf, bearish_tf = detect_signals_from_df(df_resampled, ik, index_name_tf)
+                        for sig in bullish_tf + bearish_tf:
+                            if sig["time"].date() >= datetime.now().date() - timedelta(days=60):
+                                todays_signals_all_timeframes.append(sig)
+
+                    else:
+                        if interval_value_tf in ["1D", "1W", "1M"]:
+                            res_tf = dhan_independent.historical_daily_data(
+                                security_id=security_id_tf,
+                                exchange_segment="IDX_I",
+                                instrument_type="INDEX",
+                                from_date=from_date,
+                                to_date=to_date,
+                            )
+                        else:
+                            res_tf = dhan_independent.intraday_minute_data(
+                                security_id=security_id_tf,
+                                exchange_segment="IDX_I",
+                                instrument_type="INDEX",
+                                from_date=from_today,
+                                to_date=to_today,
+                                interval=interval_value_tf,
+                            )
+                        data_list_tf = extract_data_list_from_response(res_tf)
+                        if not data_list_tf:
+                            continue
+                        df_tf = pd.DataFrame(data_list_tf)
+                        if df_tf.empty:
+                            continue
+                        if "timestamp" in df_tf.columns:
+                            df_tf["timestamp"] = pd.to_datetime(
+                                df_tf["timestamp"], unit="s", errors="coerce", utc=True
+                            ).dt.tz_convert("Asia/Kolkata")
+                        elif "time" in df_tf.columns:
+                            df_tf["timestamp"] = pd.to_datetime(
+                                df_tf["time"], unit="s", errors="coerce", utc=True
+                            ).dt.tz_convert("Asia/Kolkata")
+                        else:
+                            df_tf["timestamp"] = pd.NaT
+                        for col in ["open", "high", "low", "close"]:
+                            df_tf[col] = pd.to_numeric(df_tf.get(col, pd.NA), errors="coerce")
+                        df_tf["volume"] = pd.to_numeric(df_tf.get("volume", 0), errors="coerce").fillna(0)
+                        if interval_key_tf in RESAMPLE_RULES:
+                            df_tf = resample_session_anchored(df_tf, RESAMPLE_RULES[interval_key_tf], offset_minutes=555)
+
+                        bullish_tf, bearish_tf = detect_signals_from_df(df_tf, interval_key_tf, index_name_tf)
+                        for sig in bullish_tf + bearish_tf:
+                            if sig["time"].date() == datetime.now().date():
+                                todays_signals_all_timeframes.append(sig)
+
+                except Exception as e:
+                    print(f"❌ Error fetching signals for {index_name_tf} at {interval_key_tf}: {e}")
+                    traceback.print_exc()
+
+    return render_template(
+        "table.html",
+        data=table_data,
+        bullish_signals=all_bullish,
+        bearish_signals=all_bearish,
+        todays_signals=todays_signals_all_timeframes,
+        from_date=from_date,
+        to_date=to_date,
+        interval=interval_key,
+        index=selected_index,
+        alerts_active=True,
+        last_alert_sent=last_alert_sent,
+        index_choices=INDEX_IDS.keys(),
+    )
+
 
 @app.route('/last_alert')
 def last_alert():
     return jsonify({"last_alert_sent": last_alert_sent})
+
 
 @app.route('/test_alert')
 def test_alert():
     send_telegram_message("🚨 Test Alert: Your OHLC Signal Alerts are working! ✅")
     flash("🚨 Test Alert Sent!")
     return redirect(url_for("show_data"))
+
 
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
@@ -277,11 +605,31 @@ def settings():
         return redirect(url_for("settings"))
     return render_template("settings.html", config=config)
 
+
 scheduler = BackgroundScheduler()
 last_sent_times = {}
 
+todays_signals = []
+todays_signal_index = 0
+
+
+def reset_sent_alerts():
+    global sent_alerts
+    sent_alerts = set()
+
+
+def reset_todays_signals():
+    global todays_signals, todays_signal_index
+    todays_signals = []
+    todays_signal_index = 0
+
+
+scheduler.add_job(reset_sent_alerts, 'cron', hour=0, minute=0)
+scheduler.add_job(reset_todays_signals, 'cron', hour=9, minute=15)
+
+
 def check_all_timeframes():
-    global last_alert_sent
+    global last_alert_sent, todays_signals
     dhan = get_dhan()
     if not dhan:
         return
@@ -295,14 +643,20 @@ def check_all_timeframes():
             try:
                 if interval_value in ["1D", "1W", "1M"]:
                     res = dhan.historical_daily_data(
-                        security_id=security_id, exchange_segment="IDX_I", instrument_type="INDEX",
-                        from_date=datetime.now().strftime("%Y-%m-%d"), to_date=datetime.now().strftime("%Y-%m-%d")
+                        security_id=security_id,
+                        exchange_segment="IDX_I",
+                        instrument_type="INDEX",
+                        from_date=datetime.now().strftime("%Y-%m-%d"),
+                        to_date=datetime.now().strftime("%Y-%m-%d"),
                     )
                 else:
                     res = dhan.intraday_minute_data(
-                        security_id=security_id, exchange_segment="IDX_I", instrument_type="INDEX",
-                        from_date=datetime.now().strftime("%Y-%m-%d"), to_date=datetime.now().strftime("%Y-%m-%d"),
-                        interval=interval_value
+                        security_id=security_id,
+                        exchange_segment="IDX_I",
+                        instrument_type="INDEX",
+                        from_date=datetime.now().strftime("%Y-%m-%d"),
+                        to_date=datetime.now().strftime("%Y-%m-%d"),
+                        interval=interval_value,
                     )
                 data_list = extract_data_list_from_response(res)
                 if not data_list:
@@ -311,9 +665,13 @@ def check_all_timeframes():
                 if df.empty:
                     continue
                 if "timestamp" in df.columns:
-                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", errors="coerce", utc=True).dt.tz_convert("Asia/Kolkata")
+                    df["timestamp"] = pd.to_datetime(
+                        df["timestamp"], unit="s", errors="coerce", utc=True
+                    ).dt.tz_convert("Asia/Kolkata")
                 elif "time" in df.columns:
-                    df["timestamp"] = pd.to_datetime(df["time"], unit="s", errors="coerce", utc=True).dt.tz_convert("Asia/Kolkata")
+                    df["timestamp"] = pd.to_datetime(
+                        df["time"], unit="s", errors="coerce", utc=True
+                    ).dt.tz_convert("Asia/Kolkata")
                 else:
                     df["timestamp"] = pd.NaT
                 for col in ["open", "high", "low", "close"]:
@@ -336,14 +694,38 @@ def check_all_timeframes():
                 signal_msg = None
                 if bullish:
                     sig = bullish[0]
-                    signal_msg = (f"📈 Bullish Signal - {sig['type']} at {sig['time']} "
-                                  f"({index_name}, {interval_key})\n"
-                                  f"Stoploss: {sig['stoploss']} pts | Target: {sig['target']} pts")
+                    signal_msg = (
+                        f"📈 Bullish Signal - {sig['type']} at {sig['time']} "
+                        f"({index_name}, {interval_key})\n"
+                        f"Stoploss: {sig['stoploss']} pts | Target: {sig['target']} pts"
+                    )
+                    todays_signals.append(
+                        {
+                            "time": str(sig["time"]),
+                            "index": sig["index"],
+                            "interval": sig["interval"],
+                            "type": sig["type"],
+                            "stoploss": sig["stoploss"],
+                            "target": sig["target"],
+                        }
+                    )
                 elif bearish:
                     sig = bearish[0]
-                    signal_msg = (f"📉 Bearish Signal - {sig['type']} at {sig['time']} "
-                                  f"({index_name}, {interval_key})\n"
-                                  f"Stoploss: {sig['stoploss']} pts | Target: {sig['target']} pts")
+                    signal_msg = (
+                        f"📉 Bearish Signal - {sig['type']} at {sig['time']} "
+                        f"({index_name}, {interval_key})\n"
+                        f"Stoploss: {sig['stoploss']} pts | Target: {sig['target']} pts"
+                    )
+                    todays_signals.append(
+                        {
+                            "time": str(sig["time"]),
+                            "index": sig["index"],
+                            "interval": sig["interval"],
+                            "type": sig["type"],
+                            "stoploss": sig["stoploss"],
+                            "target": sig["target"],
+                        }
+                    )
                 if signal_msg:
                     time_module.sleep(5)
                     send_telegram_message(signal_msg)
@@ -356,15 +738,22 @@ def check_all_timeframes():
                 print(f"❌ Scheduler error ({index_name}, {interval_key}): {e}")
                 traceback.print_exc()
 
-scheduler.add_job(check_all_timeframes, 'interval', seconds=60, id="check_all_timeframes", replace_existing=True, max_instances=1)
+
+scheduler.add_job(check_all_timeframes, "interval", seconds=60, id="check_all_timeframes", replace_existing=True, max_instances=1)
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
 
-def reset_sent_alerts():
-    global sent_alerts
-    sent_alerts = set()
 
-scheduler.add_job(reset_sent_alerts, 'cron', hour=0, minute=0)
+@app.route("/todays_signal")
+def todays_signal():
+    global todays_signals, todays_signal_index
+    if not todays_signals:
+        return jsonify({"signal": None})
+    signal = todays_signals[todays_signal_index]
+    todays_signal_index = (todays_signal_index + 1) % len(todays_signals)
+    return jsonify({"signal": signal})
 
-if __name__ == '__main__':
-    app.run(debug=True)
+
+if __name__ == "__main__":
+    app.run(debug=True)    
+
