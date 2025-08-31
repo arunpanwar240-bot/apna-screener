@@ -1,5 +1,5 @@
 import pandas as pd
-from dhanhq import DhanHQ  # Adjust this import per your dhanhq package version
+import dhanhq
 from datetime import datetime
 from config import load_config
 
@@ -12,8 +12,8 @@ SESSION_END = pd.to_datetime("15:30:00").time()
 
 TIMEFRAME_MAP = {
     "1min": 1, "5min": 5, "15min": 15, "1h": 60,
-    "1d": "1D", "1w": "1W", "1m": "1M",
-    "1W": "1W", "2W": "2W", "1M": "1M"
+    "1d": "1D", "1w": "W", "1m": "M",
+    "1W": "W", "2W": "2W", "1M": "M"
 }
 
 BASE_INTERVAL = {
@@ -28,7 +28,8 @@ RESAMPLE_RULES = {
 
 def get_dhan():
     if config.get("client_id") and config.get("access_token"):
-        client = DhanHQ(client_id=config["client_id"], access_token=config["access_token"])
+        ctx = dhanhq.DhanContext(client_id=config["client_id"], access_token=config["access_token"])
+        client = dhanhq.dhanhq(ctx)
         return client
     return None
 
@@ -44,7 +45,7 @@ def extract_data_list_from_response(res):
             if key in res and res[key]:
                 return res[key]
         keys = set(res.keys())
-        if {"open", "high", "low", "close", "timestamp"}.issubset(keys):
+        if {"open", "high", "low", "close", "timestamp"} <= keys:
             return [res]
     try:
         if hasattr(res, "get"):
@@ -60,8 +61,8 @@ def detect_signals_from_df(df, interval_key, index_name):
     bearish = []
     for _, row in df.iterrows():
         ts = row.get("timestamp")
-        if pd.isna(ts) or (interval_key in ["15min","30min","45min","1h","2h","3h","4h"] and not (SESSION_START <= ts.time() <= SESSION_END)):
-            if interval_key not in ["15min","30min","45min","1h","2h","3h","4h"]:
+        if pd.isna(ts) or (interval_key in ["15min", "30min", "45min", "1h", "2h", "3h", "4h"] and not (SESSION_START <= ts.time() <= SESSION_END)):
+            if interval_key not in ["15min", "30min", "45min", "1h", "2h", "3h", "4h"]:
                 pass
             else:
                 continue
@@ -70,7 +71,7 @@ def detect_signals_from_df(df, interval_key, index_name):
             continue
         body_size = abs(c - o)
 
-        # Bullish detection
+        # Bullish patterns
         if o == l and (h - c) >= 2 * (c - l):
             bullish.append({
                 "time": ts, "interval": interval_key, "type": "EXCELLENT CANDLE",
@@ -93,7 +94,7 @@ def detect_signals_from_df(df, interval_key, index_name):
                 "target": round(h - c, 2)
             })
 
-        # Bearish detection
+        # Bearish patterns
         if o == h and (c - l) >= 2 * (h - c):
             bearish.append({
                 "time": ts, "interval": interval_key, "type": "EXCELLENT CANDLE",
@@ -115,7 +116,6 @@ def detect_signals_from_df(df, interval_key, index_name):
                 "stoploss": round(body_size + (h - o), 2),
                 "target": round(c - l, 2)
             })
-
     return bullish, bearish
 
 def resample_session_anchored(df, rule, offset_minutes):
@@ -131,7 +131,7 @@ def resample_session_anchored(df, rule, offset_minutes):
             continue
         day_df = day_df.set_index("timestamp")
         res = day_df.resample(rule, label="left", closed="left", offset=offset).agg({
-            "open":"first", "high":"max", "low":"min", "close":"last", "volume":"sum"
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
         }).dropna()
         left_ok = res.index.time >= SESSION_START
         right_edges = (res.index + step)
@@ -144,16 +144,16 @@ def resample_session_anchored(df, rule, offset_minutes):
         return df.iloc[0:0].copy()
     return pd.concat(out, ignore_index=True)
 
-def resample_weekly_from_month_start(df_daily):
-    if df_daily.empty:
-        return df_daily
+def resample_weekly_from_month_start(df):
+    if df.empty:
+        return df
     out = []
-    for (year, month), group in df_daily.groupby([df_daily["timestamp"].dt.year, df_daily["timestamp"].dt.month]):
+    for (year, month), group in df.groupby([df["timestamp"].dt.year, df["timestamp"].dt.month]):
         group = group.sort_values("timestamp")
         start_date = group["timestamp"].iloc[0].normalize()
         resampled = (
             group.set_index("timestamp")
-            .resample('7D', label='left', closed='left', origin=start_date)
+            .resample('7D', label="left", closed="left", origin=start_date)
             .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
             .dropna()
             .reset_index()
