@@ -1,5 +1,5 @@
 import pandas as pd
-from dhanhq import DhanContext, dhanhq
+from dhanhq import DhanHQ  # Adjust this import per your dhanhq package version
 from datetime import datetime
 from config import load_config
 
@@ -28,8 +28,8 @@ RESAMPLE_RULES = {
 
 def get_dhan():
     if config.get("client_id") and config.get("access_token"):
-        ctx = DhanContext(client_id=config["client_id"], access_token=config["access_token"])
-        return dhanhq(ctx)
+        client = DhanHQ(client_id=config["client_id"], access_token=config["access_token"])
+        return client
     return None
 
 def extract_data_list_from_response(res):
@@ -69,9 +69,53 @@ def detect_signals_from_df(df, interval_key, index_name):
         if pd.isna(o) or pd.isna(h) or pd.isna(l) or pd.isna(c):
             continue
         body_size = abs(c - o)
-        # Bullish signals logic...
-        # Bearish signals logic...
-        # (Copy your existing detect_signals_from_df logic here)
+
+        # Bullish detection
+        if o == l and (h - c) >= 2 * (c - l):
+            bullish.append({
+                "time": ts, "interval": interval_key, "type": "EXCELLENT CANDLE",
+                "index": index_name,
+                "stoploss": round(body_size + (o - l), 2),
+                "target": round(h - c, 2)
+            })
+        elif (o - l) <= (c - o) and (h - c) >= 2 * (c - o):
+            bullish.append({
+                "time": ts, "interval": interval_key, "type": "VERY GOOD CANDLE",
+                "index": index_name,
+                "stoploss": round(body_size + (o - l), 2),
+                "target": round(h - c, 2)
+            })
+        elif (h - c) >= 2 * (c - o) and (o - l) < 4 * (c - o) and (h - c) >= 2 * (c - l):
+            bullish.append({
+                "time": ts, "interval": interval_key, "type": "1:2 RISK REWARD CANDLE",
+                "index": index_name,
+                "stoploss": round(body_size + (o - l), 2),
+                "target": round(h - c, 2)
+            })
+
+        # Bearish detection
+        if o == h and (c - l) >= 2 * (h - c):
+            bearish.append({
+                "time": ts, "interval": interval_key, "type": "EXCELLENT CANDLE",
+                "index": index_name,
+                "stoploss": round(body_size + (h - o), 2),
+                "target": round(c - l, 2)
+            })
+        elif (h - o) <= (o - c) and (c - l) >= 2 * (o - c):
+            bearish.append({
+                "time": ts, "interval": interval_key, "type": "VERY GOOD CANDLE",
+                "index": index_name,
+                "stoploss": round(body_size + (h - o), 2),
+                "target": round(c - l, 2)
+            })
+        elif (c - l) >= 2 * (o - c) and (h - o) < 4 * (o - c) and (c - l) >= 2 * (h - c):
+            bearish.append({
+                "time": ts, "interval": interval_key, "type": "1:2 RISK REWARD CANDLE",
+                "index": index_name,
+                "stoploss": round(body_size + (h - o), 2),
+                "target": round(c - l, 2)
+            })
+
     return bullish, bearish
 
 def resample_session_anchored(df, rule, offset_minutes):
