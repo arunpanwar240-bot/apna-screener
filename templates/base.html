@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>{% block title %}Dashboard{% endblock %}</title>
+    <link href="{{ url_for('static', filename='css/bootstrap.min.css') }}" rel="stylesheet" />
+    <link href="{{ url_for('static', filename='css/styles.css') }}" rel="stylesheet" />
+    <script src="{{ url_for('static', filename='js/scripts.js') }}"></script>
+    {% block head %}{% endblock %}
+</head>
+<body data-theme="dark">
+    <header>
+        <!-- Optional: Add navigation bar -->
+    </header>
+    <main class="container-fluid mt-3">
+        {% block content %}{% endblock %}
+    </main>
+    <footer>
+        <!-- Optional: footer content -->
+    </footer>
+</body>
+</html>
