@@ -71,7 +71,7 @@ def send_telegram_message(message):
         print("❌ Telegram Error:", e)
 
 
-TIMEFRAMES_TO_NOTIFY = ["1min', "5min", "15min", "30min", "45min", "1h", "2h", "3h", "4h"]
+TIMEFRAMES_TO_NOTIFY = ["1min", "5min", "15min", "30min", "45min", "1h", "2h", "3h", "4h"]
 TIMEFRAME_MAP = {
     "1min": 1, "5min": 5, "15min": 15,
     "1h": 60, "1d": "1D", "1w": "1W", "1m": "1M",
@@ -661,5 +661,6 @@ if __name__ == "__main__":
     # ✅ Render provides $PORT; bind 0.0.0.0 for external access
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
 
 
